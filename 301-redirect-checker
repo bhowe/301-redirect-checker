@@ -1,0 +1,154 @@
+<?php
+
+function checkRedirect($sourceUrl, $expectedDestination) {
+    // First check: Get the redirect
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $sourceUrl,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HEADER => true,
+        CURLOPT_NOBODY => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_TIMEOUT => 30
+    ]);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    
+    // Parse headers to get Location
+    $headers = [];
+    $headerLines = explode("\n", $response);
+    foreach ($headerLines as $line) {
+        if (stripos($line, 'Location:') !== false) {
+            $headers['location'] = trim(substr($line, 9));
+            break;
+        }
+    }
+    
+    $actualDestination = $headers['location'] ?? '';
+    curl_close($ch);
+    
+    // Second check: Verify destination URL is not 404
+    $destinationStatus = 0;
+    if ($actualDestination) {
+        $ch2 = curl_init();
+        curl_setopt_array($ch2, [
+            CURLOPT_URL => $actualDestination,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADER => true,
+            CURLOPT_NOBODY => true,
+            CURLOPT_FOLLOWLOCATION => true,  // Follow any additional redirects
+            CURLOPT_TIMEOUT => 30
+        ]);
+        
+        curl_exec($ch2);
+        $destinationStatus = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+        curl_close($ch2);
+    }
+    
+    // Compare results
+    $result = [
+        'source_url' => $sourceUrl,
+        'expected_destination' => $expectedDestination,
+        'actual_destination' => $actualDestination,
+        'initial_status_code' => $httpCode,
+        'destination_status_code' => $destinationStatus,
+        'is_match' => (
+            $httpCode == 301 && 
+            rtrim($actualDestination, '/') === rtrim($expectedDestination, '/') &&
+            $destinationStatus !== 404
+        ),
+        'errors' => []
+    ];
+    
+    // Add specific error messages
+    if ($httpCode !== 301) {
+        $result['errors'][] = "Initial redirect is not a 301 (got: $httpCode)";
+    }
+    if (rtrim($actualDestination, '/') !== rtrim($expectedDestination, '/')) {
+        $result['errors'][] = "Destination URL doesn't match expected URL";
+    }
+    if ($destinationStatus === 404) {
+        $result['errors'][] = "Destination URL returns 404";
+    }
+    if ($destinationStatus === 0) {
+        $result['errors'][] = "Could not reach destination URL";
+    }
+    
+    return $result;
+}
+
+function processRedirectCsv($filename) {
+    $results = [];
+    
+    if (!file_exists($filename)) {
+        die("Error: File '$filename' not found.\n");
+    }
+    
+    if (($handle = fopen($filename, "r")) !== false) {
+        // Skip header row if it exists
+        fgetcsv($handle);
+        
+        while (($data = fgetcsv($handle)) !== false) {
+            if (count($data) >= 2) {
+                $sourceUrl = trim($data[0]);
+                $expectedDestination = trim($data[1]);
+                
+                if (filter_var($sourceUrl, FILTER_VALIDATE_URL) && 
+                    filter_var($expectedDestination, FILTER_VALIDATE_URL)) {
+                    $results[] = checkRedirect($sourceUrl, $expectedDestination);
+                } else {
+                    echo "Warning: Invalid URL format found in CSV: $sourceUrl or $expectedDestination\n";
+                }
+            }
+        }
+        fclose($handle);
+    }
+    
+    return $results;
+}
+
+function generateReport($results) {
+    $totalChecks = count($results);
+    $successfulRedirects = 0;
+    $failedRedirects = 0;
+    
+    echo "301 Redirect Verification Report\n";
+    echo "==============================\n\n";
+    
+    foreach ($results as $result) {
+        echo "Source URL: {$result['source_url']}\n";
+        echo "Expected Destination: {$result['expected_destination']}\n";
+        echo "Actual Destination: {$result['actual_destination']}\n";
+        echo "Initial Status Code: {$result['initial_status_code']}\n";
+        echo "Destination Status Code: {$result['destination_status_code']}\n";
+        echo "Match: " . ($result['is_match'] ? "✓ YES" : "✗ NO") . "\n";
+        
+        if (!empty($result['errors'])) {
+            echo "Errors Found:\n";
+            foreach ($result['errors'] as $error) {
+                echo "  - $error\n";
+            }
+        }
+        
+        echo "----------------------------------------\n";
+        
+        if ($result['is_match']) {
+            $successfulRedirects++;
+        } else {
+            $failedRedirects++;
+        }
+    }
+    
+    echo "\nSummary:\n";
+    echo "Total checks: $totalChecks\n";
+    echo "Successful redirects: $successfulRedirects\n";
+    echo "Failed redirects: $failedRedirects\n";
+}
+
+// Example usage
+$filename = 'redirects.csv';
+$results = processRedirectCsv($filename);
+generateReport($results);
+
+?>
